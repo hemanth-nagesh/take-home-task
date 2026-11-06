@@ -1,0 +1,99 @@
+volumes:
+  postgres_data:
+
+services:
+
+  # Postgres 16
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: shophub
+      POSTGRES_USER: shophub
+      POSTGRES_PASSWORD: shophub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shophub -d shophub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Store API  (port 8001)
+  store-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "store_api.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    environment:
+      PYTHONPATH: /app
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/health > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Orders Agent  (port 8002)
+  orders-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "orders_agent.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    ports:
+      - "8002:8002"
+    environment:
+      PYTHONPATH: /app
+      STORE_API_URL: http://store-api:8001
+      # Advertised in the agent card — must be reachable from the orchestrator container
+      ORDERS_AGENT_PUBLIC_URL: http://orders-agent:8002
+    depends_on:
+      store-api:
+        condition: service_healthy
+    healthcheck:
+      # The orders agent exposes /.well-known/agent.json instead of /health
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8002/.well-known/agent.json > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Orchestrator  (port 8000)
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      PYTHONPATH: /app
+      STORE_API_URL: http://store-api:8001
+      ORDERS_AGENT_URL: http://orders-agent:8002
+      DATABASE_URL: postgresql://shophub:shophub@db:5432/shophub
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      LLM_MODEL: ${LLM_MODEL:-gemma4:latest}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      store-api:
+        condition: service_healthy
+      orders-agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
